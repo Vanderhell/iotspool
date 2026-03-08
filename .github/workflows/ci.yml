@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  # ── Host matrix: gcc + clang ─────────────────────────────────────────────
+  host:
+    name: host (${{ matrix.cc }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DIOTSPOOL_BUILD_TESTS=ON \
+            -DIOTSPOOL_BUILD_EXAMPLES=ON \
+            -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # ── Address Sanitizer ────────────────────────────────────────────────────
+  asan:
+    name: host (asan)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          cmake -S . -B build-asan \
+            -DCMAKE_C_COMPILER=clang \
+            -DIOTSPOOL_BUILD_TESTS=ON \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+      - name: Build
+        run: cmake --build build-asan -j$(nproc)
+      - name: Test
+        run: ctest --test-dir build-asan --output-on-failure
+
+  # ── Cortex-M compile-only ────────────────────────────────────────────────
+  stm32_compile:
+    name: arm-none-eabi compile
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get install -y gcc-arm-none-eabi
+      - name: Configure
+        run: |
+          cmake -S . -B build-stm32 \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-none-eabi-gcc.cmake \
+            -DIOTSPOOL_BUILD_TESTS=OFF \
+            -DIOTSPOOL_BUILD_EXAMPLES=OFF
+      - name: Build
+        run: cmake --build build-stm32 -j$(nproc)
