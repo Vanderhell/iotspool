@@ -6,6 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#if defined(_WIN32)
+#include <io.h>
+#include <windows.h>
+#endif
 #if defined(__linux__) || defined(__APPLE__)
 #include <unistd.h>
 #endif
@@ -58,8 +62,27 @@ static iotspool_err_t posix_truncate(void *ctx, uint32_t new_size) {
     fseek(c->fp, 0, SEEK_END);
     c->size = new_size;
     return IOTSPOOL_OK;
+#elif defined(_WIN32)
+    int fd;
+    intptr_t osfh;
+    HANDLE handle;
+    LARGE_INTEGER offset;
+
+    if (fflush(c->fp) != 0) return IOTSPOOL_EIO;
+    fd = _fileno(c->fp);
+    if (fd < 0) return IOTSPOOL_EIO;
+    osfh = _get_osfhandle(fd);
+    if (osfh == -1) return IOTSPOOL_EIO;
+    handle = (HANDLE)osfh;
+    offset.QuadPart = (LONGLONG)new_size;
+    if (!SetFilePointerEx(handle, offset, NULL, FILE_BEGIN)) return IOTSPOOL_EIO;
+    if (!SetEndOfFile(handle)) return IOTSPOOL_EIO;
+    if (fseek(c->fp, 0, SEEK_END) != 0) return IOTSPOOL_EIO;
+    c->size = new_size;
+    return IOTSPOOL_OK;
 #else
-    (void)ctx; (void)new_size;
+    (void)c;
+    (void)new_size;
     return IOTSPOOL_EIO; /* not supported on this platform */
 #endif
 }

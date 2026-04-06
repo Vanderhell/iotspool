@@ -9,7 +9,9 @@ option(IOTSPOOL_BUILD_EXAMPLES "Build host examples"  ON)
 option(IOTSPOOL_ENABLE_SHA256  "Enable SHA-256 support" ON)
 
 # ── Warnings ────────────────────────────────────────────────────────────────
-if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+if(MSVC)
+    add_compile_options(/W4)
+elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
 endif()
 
@@ -25,6 +27,10 @@ add_library(iotspool STATIC
 target_include_directories(iotspool PUBLIC include)
 target_include_directories(iotspool PRIVATE src)
 
+if(MSVC)
+    target_compile_definitions(iotspool PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+
 if(IOTSPOOL_ENABLE_SHA256)
     target_compile_definitions(iotspool PUBLIC IOTSPOOL_ENABLE_SHA256)
 endif()
@@ -39,7 +45,7 @@ if(IOTSPOOL_BUILD_TESTS)
 endif()
 
 # ── Examples ─────────────────────────────────────────────────────────────────
-if(IOTSPOOL_BUILD_EXAMPLES)
+if(IOTSPOOL_BUILD_EXAMPLES AND NOT WIN32)
     add_executable(example_rpi examples/rpi/main.c)
     target_link_libraries(example_rpi PRIVATE iotspool)
 endif()
