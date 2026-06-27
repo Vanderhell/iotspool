@@ -17,8 +17,32 @@ enum {
     INITIAL_GENERATION = 1u
 };
 
+static void zero_bytes(void *dst, size_t len) {
+    uint8_t *p = (uint8_t *)dst;
+    if (!p) return;
+    for (size_t i = 0; i < len; ++i) {
+        p[i] = 0;
+    }
+}
+
+static void copy_bytes(void *dst, const void *src, size_t len) {
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    if (!d || !s) return;
+    for (size_t i = 0; i < len; ++i) {
+        d[i] = s[i];
+    }
+}
+
+static void move_entries_left(iotspool_entry_t *entries, uint32_t idx, uint32_t count) {
+    if (!entries || count == 0) return;
+    for (uint32_t i = 0; i < count; ++i) {
+        entries[idx + i] = entries[idx + i + 1u];
+    }
+}
+
 static void zero_stats(iotspool_stats_t *stats) {
-    if (stats) memset(stats, 0, sizeof(*stats));
+    zero_bytes(stats, sizeof(*stats));
 }
 
 static uint32_t topic_len_bounded(const char *topic, uint32_t max_len) {
@@ -76,7 +100,7 @@ static bool store_has_room(const iotspool_t *s, uint32_t need_bytes) {
 static void clear_inflight(iotspool_t *s) {
     if (!s) return;
     s->inflight_active = false;
-    memset(&s->inflight, 0, sizeof(s->inflight));
+    zero_bytes(&s->inflight, sizeof(s->inflight));
 }
 
 static void clear_entries(iotspool_t *s) {
@@ -105,8 +129,7 @@ static iotspool_entry_t *find_entry(iotspool_t *s, iotspool_msg_id_t id, uint32_
 static void remove_entry_index(iotspool_t *s, uint32_t idx) {
     if (!s || idx >= s->entry_count) return;
     if (idx + 1u < s->entry_count) {
-        memmove(&s->entries[idx], &s->entries[idx + 1u],
-                (size_t)(s->entry_count - idx - 1u) * sizeof(s->entries[0]));
+        move_entries_left(s->entries, idx, s->entry_count - idx - 1u);
     }
     --s->entry_count;
     s->head = 0;
@@ -115,8 +138,7 @@ static void remove_entry_index(iotspool_t *s, uint32_t idx) {
 
 static iotspool_err_t write_superblock(iotspool_t *s, uint32_t committed_pos) {
     uint8_t buf[32];
-    iotspool_superblock_t sb;
-    memset(&sb, 0, sizeof(sb));
+    iotspool_superblock_t sb = {0};
     sb.magic = IOTSPOOL_STORE_MAGIC;
     sb.version = IOTSPOOL_STORE_VERSION;
     sb.record_version = IOTSPOOL_RECORD_VERSION;
@@ -171,8 +193,7 @@ static iotspool_err_t compact_to_live_generation(iotspool_t *s) {
         goto cleanup_compact;
     }
 
-    iotspool_superblock_t sb;
-    memset(&sb, 0, sizeof(sb));
+    iotspool_superblock_t sb = {0};
     sb.magic = IOTSPOOL_STORE_MAGIC;
     sb.version = IOTSPOOL_STORE_VERSION;
     sb.record_version = IOTSPOOL_RECORD_VERSION;
@@ -222,7 +243,7 @@ static iotspool_err_t compact_to_live_generation(iotspool_t *s) {
             result = IOTSPOOL_ENOMEM;
             goto cleanup_compact;
         }
-        memcpy(topic_copy, enq.topic, enq.topic_len);
+        copy_bytes(topic_copy, enq.topic, enq.topic_len);
         topic_copy[enq.topic_len] = '\0';
         msg.topic = topic_copy;
         uint32_t rec_len = record_encode_enqueue(snapshot + pos,
@@ -454,7 +475,7 @@ iotspool_err_t iotspool_init_inplace(iotspool_t *s,
     if (entry_cap < cfg->max_pending_msgs) return IOTSPOOL_EINVAL;
     if (scratch_cap < iotspool_required_scratch_bytes(cfg)) return IOTSPOOL_EINVAL;
 
-    memset(s, 0, sizeof(*s));
+    zero_bytes(s, sizeof(*s));
     s->cfg = *cfg;
     s->store = *store;
     s->state = IOTSPOOL_STATE_INITIALIZED;
@@ -522,7 +543,7 @@ void iotspool_deinit(iotspool_t *s) {
         free(s->owned_workspace);
         return;
     }
-    memset(s, 0, sizeof(*s));
+    zero_bytes(s, sizeof(*s));
 }
 
 static iotspool_err_t rebuild_from_store(iotspool_t *s, uint32_t size) {
