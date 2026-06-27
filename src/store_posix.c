@@ -27,6 +27,22 @@ typedef struct {
     uint32_t size;   /* cached size to avoid fseek on every append */
 } posix_ctx_t;
 
+static void copy_path(char *dst, const char *src, size_t len) {
+    if (!dst || !src) return;
+    for (size_t i = 0; i < len; ++i) {
+        dst[i] = src[i];
+    }
+    dst[len] = '\0';
+}
+
+static size_t path_len_bounded(const char *path, size_t cap) {
+    if (!path) return SIZE_MAX;
+    for (size_t i = 0; i < cap; ++i) {
+        if (path[i] == '\0') return i;
+    }
+    return SIZE_MAX;
+}
+
 static iotspool_err_t posix_append(void *ctx, const uint8_t *data, uint32_t len) {
     posix_ctx_t *c = (posix_ctx_t *)ctx;
     if (fwrite(data, 1, len, c->fp) != len) return IOTSPOOL_EIO;
@@ -69,8 +85,10 @@ static iotspool_err_t posix_replace(void *ctx, const uint8_t *data, uint32_t len
     if (!c || !c->path || (!data && len > 0u)) return IOTSPOOL_EINVAL;
 
     char tmp_path[1024];
-    int tmp_len = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", c->path);
-    if (tmp_len < 0 || (size_t)tmp_len >= sizeof(tmp_path)) return IOTSPOOL_EINVAL;
+    size_t base_len = path_len_bounded(c->path, sizeof(tmp_path) - 4u);
+    if (base_len == SIZE_MAX) return IOTSPOOL_EINVAL;
+    copy_path(tmp_path, c->path, base_len);
+    copy_path(tmp_path + base_len, ".tmp", 4u);
 
     FILE *tmp = fopen(tmp_path, "wb");
     if (!tmp) return IOTSPOOL_EIO;
@@ -177,7 +195,7 @@ iotspool_err_t store_posix_open(const char *path, iotspool_store_t *store) {
         free(c);
         return IOTSPOOL_ENOMEM;
     }
-    strcpy(c->path, path);
+    copy_path(c->path, path, strlen(path));
 
     /* Open for read+write, create if missing */
     c->fp = fopen(path, "a+b");
