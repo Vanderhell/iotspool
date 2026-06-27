@@ -45,7 +45,7 @@ static void put_u64(uint8_t *p, uint64_t v) {
 }
 
 static uint16_t get_u16(const uint8_t *p) {
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
 
 static uint32_t get_u32(const uint8_t *p) {

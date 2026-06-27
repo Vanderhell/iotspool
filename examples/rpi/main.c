@@ -10,7 +10,12 @@
  * SPDX-License-Identifier: MIT
  */
 
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <stdio.h>
+#include <inttypes.h>
 #include <string.h>
 #include <time.h>
 #include "iotspool.h"
@@ -78,7 +83,7 @@ int main(void) {
         };
         iotspool_msg_id_t id;
         iotspool_err_t err = iotspool_enqueue(spool, &m, &id);
-        printf("  enqueue %-25s  id=%u  %s\n",
+        printf("  enqueue %-25s  id=%" PRIu64 "  %s\n",
                topics[i], id, iotspool_strerror(err));
     }
 

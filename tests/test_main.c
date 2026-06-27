@@ -723,6 +723,7 @@ static void test_randomized_model(void) {
     uint64_t model[8];
     uint32_t model_count = 0;
     for (int i = 0; i < 200; ++i) {
+        uint32_t now_ms = (uint32_t)i * 10u;
         seed = seed * 1103515245u + 12345u;
         unsigned op = (seed >> 16) % 6u;
         if (op == 0 && model_count < 8) {
@@ -735,7 +736,7 @@ static void test_randomized_model(void) {
             }
         } else if (op == 1 && model_count > 0) {
             iotspool_inflight_t token;
-            if (iotspool_acquire_ready(&spool, i * 10u, &token) == IOTSPOOL_OK) {
+            if (iotspool_acquire_ready(&spool, now_ms, &token) == IOTSPOOL_OK) {
                 TEST_ASSERT_EQ(token.id, model[0]);
                 TEST_ASSERT_EQ(iotspool_publish_confirmed(&spool, &token), IOTSPOOL_OK);
                 memmove(model, model + 1, (model_count - 1u) * sizeof(model[0]));
@@ -746,7 +747,7 @@ static void test_randomized_model(void) {
             memmove(model, model + 1, (model_count - 1u) * sizeof(model[0]));
             --model_count;
         } else if (op == 3 && model_count > 0) {
-            TEST_ASSERT_EQ(iotspool_drop_oldest(&spool, i * 10u), IOTSPOOL_OK);
+            TEST_ASSERT_EQ(iotspool_drop_oldest(&spool, now_ms), IOTSPOOL_OK);
             memmove(model, model + 1, (model_count - 1u) * sizeof(model[0]));
             --model_count;
         } else if (op == 4) {
