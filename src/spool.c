@@ -157,6 +157,7 @@ static iotspool_err_t compact_to_live_generation(iotspool_t *s) {
     iotspool_entry_t *new_entries = NULL;
     uint32_t *new_offsets = NULL;
     uint32_t *new_lengths = NULL;
+    iotspool_err_t result = IOTSPOOL_OK;
     if (!snapshot) {
         s->state = IOTSPOOL_STATE_READY;
         return IOTSPOOL_ENOMEM;
@@ -166,12 +167,8 @@ static iotspool_err_t compact_to_live_generation(iotspool_t *s) {
     new_lengths = (uint32_t *)malloc((size_t)s->entry_count * sizeof(*new_lengths));
     if ((!new_entries && s->entry_count > 0) || (!new_offsets && s->entry_count > 0) ||
         (!new_lengths && s->entry_count > 0)) {
-        free(snapshot);
-        free(new_entries);
-        free(new_offsets);
-        free(new_lengths);
-        s->state = IOTSPOOL_STATE_READY;
-        return IOTSPOOL_ENOMEM;
+        result = IOTSPOOL_ENOMEM;
+        goto cleanup_compact;
     }
 
     iotspool_superblock_t sb;
@@ -184,27 +181,24 @@ static iotspool_err_t compact_to_live_generation(iotspool_t *s) {
     sb.configured_size = s->cfg.max_store_bytes;
     sb.committed_pos = (uint32_t)record_superblock_size();
     if (record_encode_superblock(snapshot, (uint32_t)snap_cap, &sb) != IOTSPOOL_OK) {
-        free(snapshot);
-        s->state = IOTSPOOL_STATE_READY;
-        return IOTSPOOL_EINVAL;
+        result = IOTSPOOL_EINVAL;
+        goto cleanup_compact;
     }
 
     uint32_t pos = (uint32_t)record_superblock_size();
     for (uint32_t i = 0; i < s->entry_count; ++i) {
         iotspool_entry_t *e = &s->entries[i];
         if (e->record_len > s->scratch_cap) {
-            free(snapshot);
-            s->state = IOTSPOOL_STATE_READY;
-            return IOTSPOOL_ENOMEM;
+            result = IOTSPOOL_ENOMEM;
+            goto cleanup_compact;
         }
 
         uint32_t got = 0;
         iotspool_err_t err = s->store.read_at(s->store.ctx, e->record_offset,
                                               s->scratch, e->record_len, &got);
         if (err != IOTSPOOL_OK || got < e->record_len) {
-            free(snapshot);
-            s->state = IOTSPOOL_STATE_READY;
-            return (err != IOTSPOOL_OK) ? err : IOTSPOOL_EIO;
+            result = (err != IOTSPOOL_OK) ? err : IOTSPOOL_EIO;
+            goto cleanup_compact;
         }
 
         record_enqueue_t enq = {0};
@@ -213,9 +207,8 @@ static iotspool_err_t compact_to_live_generation(iotspool_t *s) {
         iotspool_decode_result_t d = record_decode(s->scratch, got, &type,
                                                     &enq, NULL, NULL, &consumed);
         if (d != IOTSPOOL_DEC_VALID || type != IOTSPOOL_REC_TYPE_ENQUEUE) {
-            free(snapshot);
-            s->state = IOTSPOOL_STATE_READY;
-            return IOTSPOOL_ECORRUPT;
+            result = IOTSPOOL_ECORRUPT;
+            goto cleanup_compact;
         }
         iotspool_msg_t msg = {
             .topic = NULL,
@@ -226,12 +219,8 @@ static iotspool_err_t compact_to_live_generation(iotspool_t *s) {
         };
         char *topic_copy = (char *)malloc((size_t)enq.topic_len + 1u);
         if (!topic_copy) {
-            free(snapshot);
-            free(new_entries);
-            free(new_offsets);
-            free(new_lengths);
-            s->state = IOTSPOOL_STATE_READY;
-            return IOTSPOOL_ENOMEM;
+            result = IOTSPOOL_ENOMEM;
+            goto cleanup_compact;
         }
         memcpy(topic_copy, enq.topic, enq.topic_len);
         topic_copy[enq.topic_len] = '\0';
@@ -243,12 +232,8 @@ static iotspool_err_t compact_to_live_generation(iotspool_t *s) {
                                                  s->cfg.enable_sha256);
         free(topic_copy);
         if (rec_len == 0) {
-            free(snapshot);
-            free(new_entries);
-            free(new_offsets);
-            free(new_lengths);
-            s->state = IOTSPOOL_STATE_READY;
-            return IOTSPOOL_EFULL;
+            result = IOTSPOOL_EFULL;
+            goto cleanup_compact;
         }
         new_entries[i] = *e;
         new_entries[i].generation = sb.generation;
@@ -259,30 +244,19 @@ static iotspool_err_t compact_to_live_generation(iotspool_t *s) {
 
     sb.committed_pos = pos;
     if (record_encode_superblock(snapshot, (uint32_t)snap_cap, &sb) != IOTSPOOL_OK) {
-        free(snapshot);
-        free(new_entries);
-        free(new_offsets);
-        free(new_lengths);
-        s->state = IOTSPOOL_STATE_READY;
-        return IOTSPOOL_EINVAL;
+        result = IOTSPOOL_EINVAL;
+        goto cleanup_compact;
     }
 
     iotspool_err_t err = s->store.replace(s->store.ctx, snapshot, pos);
-    free(snapshot);
     if (err != IOTSPOOL_OK) {
-        free(new_entries);
-        free(new_offsets);
-        free(new_lengths);
-        s->state = IOTSPOOL_STATE_READY;
-        return err;
+        result = err;
+        goto cleanup_compact;
     }
     err = s->store.sync(s->store.ctx);
     if (err != IOTSPOOL_OK) {
-        free(new_entries);
-        free(new_offsets);
-        free(new_lengths);
-        s->state = IOTSPOOL_STATE_READY;
-        return err;
+        result = err;
+        goto cleanup_compact;
     }
 
     for (uint32_t i = 0; i < s->entry_count; ++i) {
@@ -297,8 +271,13 @@ static iotspool_err_t compact_to_live_generation(iotspool_t *s) {
     s->generation = sb.generation;
     clear_inflight(s);
     backoff_reset_local(s);
+cleanup_compact:
+    free(snapshot);
+    free(new_entries);
+    free(new_offsets);
+    free(new_lengths);
     s->state = IOTSPOOL_STATE_READY;
-    return IOTSPOOL_OK;
+    return result;
 }
 
 static iotspool_err_t iotspool_compact_locked(iotspool_t *s) {
@@ -418,7 +397,7 @@ static iotspool_err_t remove_by_id(iotspool_t *s, iotspool_msg_id_t id) {
     return IOTSPOOL_OK;
 }
 
-static iotspool_err_t ensure_ready_state(iotspool_t *s) {
+static iotspool_err_t ensure_ready_state(const iotspool_t *s) {
     if (!s) return IOTSPOOL_EINVAL;
     if (s->state != IOTSPOOL_STATE_READY) return IOTSPOOL_ESTATE;
     return IOTSPOOL_OK;
