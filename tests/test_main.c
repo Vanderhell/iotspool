@@ -59,6 +59,30 @@ typedef struct {
     uint32_t unlock_calls;
 } lock_ctx_t;
 
+static void zero_bytes(void *dst, size_t len) {
+    uint8_t *p = (uint8_t *)dst;
+    if (!p) return;
+    for (size_t i = 0; i < len; ++i) {
+        p[i] = 0;
+    }
+}
+
+static void copy_bytes(void *dst, const void *src, size_t len) {
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    if (!d || !s) return;
+    for (size_t i = 0; i < len; ++i) {
+        d[i] = s[i];
+    }
+}
+
+static void move_u64_left(uint64_t *values, uint32_t count) {
+    if (!values || count == 0) return;
+    for (uint32_t i = 0; i + 1u < count; ++i) {
+        values[i] = values[i + 1u];
+    }
+}
+
 static iotspool_err_t fi_append(void *ctx, const uint8_t *data, uint32_t len) {
     fi_store_t *s = (fi_store_t *)ctx;
     ++s->append_calls;
@@ -66,13 +90,13 @@ static iotspool_err_t fi_append(void *ctx, const uint8_t *data, uint32_t len) {
         if (s->partial_append && len > 0u && s->size < s->cap) {
             uint32_t copy = len / 2u;
             if (copy > s->cap - s->size) copy = s->cap - s->size;
-            memcpy(s->buf + s->size, data, copy);
+            copy_bytes(s->buf + s->size, data, copy);
             s->size += copy;
         }
         return IOTSPOOL_EIO;
     }
     if (len > s->cap - s->size) return IOTSPOOL_EFULL;
-    memcpy(s->buf + s->size, data, len);
+    copy_bytes(s->buf + s->size, data, len);
     s->size += len;
     return IOTSPOOL_OK;
 }
@@ -90,7 +114,7 @@ static iotspool_err_t fi_read_at(void *ctx, uint32_t off, uint8_t *out,
     }
     uint32_t n = s->size - off;
     if (n > cap) n = cap;
-    memcpy(out, s->buf + off, n);
+    copy_bytes(out, s->buf + off, n);
     if (out_len) *out_len = n;
     return IOTSPOOL_OK;
 }
@@ -127,13 +151,13 @@ static iotspool_err_t fi_replace(void *ctx, const uint8_t *data, uint32_t len) {
         return IOTSPOOL_EIO;
     }
     if (len > s->cap) return IOTSPOOL_EFULL;
-    memcpy(s->buf, data, len);
+    copy_bytes(s->buf, data, len);
     s->size = len;
     return IOTSPOOL_OK;
 }
 
 static void make_fi_store(fi_store_t *s, uint8_t *buf, uint32_t cap) {
-    memset(s, 0, sizeof(*s));
+    zero_bytes(s, sizeof(*s));
     s->buf = buf;
     s->cap = cap;
     s->fail_append_after = -1;
@@ -257,7 +281,7 @@ static void test_topic_and_payload_validation(void) {
     TEST_ASSERT_EQ(iotspool_enqueue(&spool, &m, NULL), IOTSPOOL_EINVAL);
 
     char long_topic[32];
-    memset(long_topic, 'a', sizeof(long_topic));
+    for (size_t i = 0; i < sizeof(long_topic); ++i) long_topic[i] = 'a';
     long_topic[sizeof(long_topic) - 1] = '\0';
     m.topic = long_topic;
     TEST_ASSERT_EQ(iotspool_enqueue(&spool, &m, NULL), IOTSPOOL_EINVAL);
@@ -725,7 +749,9 @@ static void test_randomized_model(void) {
         unsigned op = (seed >> 16) % 6u;
         if (op == 0 && model_count < 8) {
             char topic[8];
-            snprintf(topic, sizeof(topic), "t%u", (seed >> 8) & 7u);
+            topic[0] = 't';
+            topic[1] = (char)('0' + ((seed >> 8) & 7u));
+            topic[2] = '\0';
             iotspool_msg_t m = { .topic = topic, .payload = (const uint8_t *)"x", .payload_len = 1, .qos = 0, .retain = false };
             iotspool_msg_id_t id = 0;
             if (iotspool_enqueue(&spool, &m, &id) == IOTSPOOL_OK) {
@@ -736,16 +762,16 @@ static void test_randomized_model(void) {
             if (iotspool_acquire_ready(&spool, now_ms, &token) == IOTSPOOL_OK) {
                 TEST_ASSERT_EQ(token.id, model[0]);
                 TEST_ASSERT_EQ(iotspool_publish_confirmed(&spool, &token), IOTSPOOL_OK);
-                memmove(model, model + 1, (model_count - 1u) * sizeof(model[0]));
+                move_u64_left(model, model_count);
                 --model_count;
             }
         } else if (op == 2 && model_count > 0) {
             TEST_ASSERT_EQ(iotspool_ack(&spool, model[0]), IOTSPOOL_OK);
-            memmove(model, model + 1, (model_count - 1u) * sizeof(model[0]));
+            move_u64_left(model, model_count);
             --model_count;
         } else if (op == 3 && model_count > 0) {
             TEST_ASSERT_EQ(iotspool_drop_oldest(&spool, now_ms), IOTSPOOL_OK);
-            memmove(model, model + 1, (model_count - 1u) * sizeof(model[0]));
+            move_u64_left(model, model_count);
             --model_count;
         } else if (op == 4) {
             TEST_ASSERT_EQ(iotspool_recover(&spool), IOTSPOOL_ESTATE);
