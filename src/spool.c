@@ -264,9 +264,6 @@ static iotspool_err_t compact_to_live_generation(iotspool_t *s) {
         s->entries[i].record_offset = new_offsets[i];
         s->entries[i].record_len = new_lengths[i];
     }
-    free(new_entries);
-    free(new_offsets);
-    free(new_lengths);
 
     s->generation = sb.generation;
     clear_inflight(s);
