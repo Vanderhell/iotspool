@@ -26,6 +26,23 @@ enum {
     SUPERBLOCK_SIZE = 32u
 };
 
+static void zero_bytes(void *dst, size_t len) {
+    uint8_t *p = (uint8_t *)dst;
+    if (!p) return;
+    for (size_t i = 0; i < len; ++i) {
+        p[i] = 0;
+    }
+}
+
+static void copy_bytes(void *dst, const void *src, size_t len) {
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    if (!d || !s) return;
+    for (size_t i = 0; i < len; ++i) {
+        d[i] = s[i];
+    }
+}
+
 static void put_u16(uint8_t *p, uint16_t v) {
     p[0] = (uint8_t)(v & 0xffu);
     p[1] = (uint8_t)((v >> 8) & 0xffu);
@@ -152,11 +169,11 @@ static uint32_t record_encode_common(uint8_t *buf, uint32_t cap,
 
     p += RECORD_HEADER_SIZE;
     if (topic_len && topic) {
-        memcpy(p, topic, topic_len);
+        copy_bytes(p, topic, topic_len);
     }
     p += topic_len;
     if (payload_len && payload) {
-        memcpy(p, payload, payload_len);
+        copy_bytes(p, payload, payload_len);
     }
     p += payload_len;
 
@@ -164,7 +181,7 @@ static uint32_t record_encode_common(uint8_t *buf, uint32_t cap,
     if (sha_len) {
         uint8_t digest[32];
         sha256(buf, (size_t)(p - buf), digest);
-        memcpy(p, digest, sizeof(digest));
+        copy_bytes(p, digest, sizeof(digest));
         p += sizeof(digest);
     }
 #endif
@@ -225,7 +242,7 @@ iotspool_err_t record_encode_superblock(uint8_t *buf, uint32_t cap,
 {
     if (!buf || !sb || cap < SUPERBLOCK_SIZE) return IOTSPOOL_EINVAL;
 
-    memset(buf, 0, SUPERBLOCK_SIZE);
+    zero_bytes(buf, SUPERBLOCK_SIZE);
     put_u32(buf + 0, sb->magic);
     put_u16(buf + 4, sb->version);
     put_u16(buf + 6, sb->record_version);
@@ -235,7 +252,7 @@ iotspool_err_t record_encode_superblock(uint8_t *buf, uint32_t cap,
     put_u32(buf + 20, sb->committed_pos);
     uint32_t crc = crc32(buf, 24u);
     put_u32(buf + 24, crc);
-    memcpy(buf + 28, sb->reserved, sizeof(sb->reserved));
+    copy_bytes(buf + 28, sb->reserved, sizeof(sb->reserved));
     return IOTSPOOL_OK;
 }
 
@@ -246,7 +263,7 @@ iotspool_decode_result_t record_decode_superblock(const uint8_t *buf,
     if (!buf || !sb) return IOTSPOOL_DEC_IO_ERROR;
     if (avail < SUPERBLOCK_SIZE) return IOTSPOOL_DEC_INCOMPLETE_TAIL;
 
-    memset(sb, 0, sizeof(*sb));
+    zero_bytes(sb, sizeof(*sb));
     sb->magic = get_u32(buf + 0);
     sb->version = get_u16(buf + 4);
     sb->record_version = get_u16(buf + 6);
@@ -255,7 +272,7 @@ iotspool_decode_result_t record_decode_superblock(const uint8_t *buf,
     sb->configured_size = get_u32(buf + 16);
     sb->committed_pos = get_u32(buf + 20);
     sb->crc32 = get_u32(buf + 24);
-    memcpy(sb->reserved, buf + 28, sizeof(sb->reserved));
+    copy_bytes(sb->reserved, buf + 28, sizeof(sb->reserved));
 
     if (sb->magic != IOTSPOOL_STORE_MAGIC) return IOTSPOOL_DEC_CORRUPT;
     if (sb->version != IOTSPOOL_STORE_VERSION) return IOTSPOOL_DEC_UNSUPPORTED_VERSION;
