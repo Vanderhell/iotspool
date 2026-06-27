@@ -6,62 +6,143 @@ on:
   pull_request:
 
 jobs:
-  # ── Host matrix: gcc + clang ─────────────────────────────────────────────
-  host:
-    name: host (${{ matrix.cc }})
+  strict_host:
+    name: host strict (${{ matrix.cc }}, ${{ matrix.build_type }}, c${{ matrix.c_standard }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         cc: [gcc, clang]
+        build_type: [Debug, Release]
+        c_standard: [99, 11]
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: |
-          cmake -S . -B build \
-            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
-            -DIOTSPOOL_BUILD_TESTS=ON \
-            -DIOTSPOOL_BUILD_EXAMPLES=ON \
-            -DCMAKE_BUILD_TYPE=Debug
+        run: >
+          cmake -S . -B build
+          -DCMAKE_C_COMPILER=${{ matrix.cc }}
+          -DIOTSPOOL_C_STANDARD=${{ matrix.c_standard }}
+          -DIOTSPOOL_BUILD_TESTS=ON
+          -DIOTSPOOL_BUILD_EXAMPLES=ON
+          -DIOTSPOOL_ENABLE_SHA256=ON
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
 
       - name: Build
-        run: cmake --build build -j$(nproc)
+        run: cmake --build build --parallel
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-  # ── Address Sanitizer ────────────────────────────────────────────────────
-  asan:
-    name: host (asan)
+  sha_disabled:
+    name: host sha disabled
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Configure
-        run: |
-          cmake -S . -B build-asan \
-            -DCMAKE_C_COMPILER=clang \
-            -DIOTSPOOL_BUILD_TESTS=ON \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+        run: >
+          cmake -S . -B build-no-sha
+          -DCMAKE_C_COMPILER=gcc
+          -DIOTSPOOL_BUILD_TESTS=ON
+          -DIOTSPOOL_BUILD_EXAMPLES=ON
+          -DIOTSPOOL_ENABLE_SHA256=OFF
+          -DCMAKE_BUILD_TYPE=Release
       - name: Build
-        run: cmake --build build-asan -j$(nproc)
+        run: cmake --build build-no-sha --parallel
       - name: Test
-        run: ctest --test-dir build-asan --output-on-failure
+        run: ctest --test-dir build-no-sha --output-on-failure
 
-  # ── Cortex-M compile-only ────────────────────────────────────────────────
-  stm32_compile:
-    name: arm-none-eabi compile
+  sanitizers:
+    name: host ${{ matrix.sanitizer }}
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sanitizer: asan
+            flags: -fsanitize=address,undefined -fno-omit-frame-pointer
+          - sanitizer: ubsan
+            flags: -fsanitize=undefined -fno-omit-frame-pointer
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        env:
+          SANITIZER_FLAGS: ${{ matrix.flags }}
+        run: >
+          cmake -S . -B build-${{ matrix.sanitizer }}
+          -DCMAKE_C_COMPILER=clang
+          -DIOTSPOOL_BUILD_TESTS=ON
+          -DIOTSPOOL_BUILD_EXAMPLES=ON
+          -DIOTSPOOL_ENABLE_SHA256=ON
+          -DCMAKE_BUILD_TYPE=Debug
+          "-DCMAKE_C_FLAGS=${SANITIZER_FLAGS}"
+      - name: Build
+        run: cmake --build build-${{ matrix.sanitizer }} --parallel
+      - name: Test
+        run: ctest --test-dir build-${{ matrix.sanitizer }} --output-on-failure
+
+  analysis:
+    name: static analysis
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y cppcheck clang-tidy
+      - name: Configure
+        run: >
+          cmake -S . -B build-analysis
+          -DCMAKE_C_COMPILER=gcc
+          -DIOTSPOOL_BUILD_TESTS=ON
+          -DIOTSPOOL_BUILD_EXAMPLES=ON
+          -DIOTSPOOL_ENABLE_SHA256=ON
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      - name: Build
+        run: cmake --build build-analysis --parallel
+      - name: Cppcheck
+        run: >
+          cppcheck
+          --enable=warning,style,performance,portability
+          --error-exitcode=1
+          --std=c99
+          --language=c
+          -I include
+          -I src
+          src/spool.c src/record.c src/store_posix.c tests/test_main.c
+      - name: Clang-tidy
+        run: |
+          for file in src/spool.c src/record.c src/store_posix.c tests/test_main.c; do
+            clang-tidy -p build-analysis "$file" --warnings-as-errors=* -- || exit 1
+          done
+
+  cortex_smoke:
+    name: cortex-m smoke (${{ matrix.cpu }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cpu: cortex-m0plus
+            extra_flags: ""
+          - cpu: cortex-m4
+            extra_flags: "-DIOTSPOOL_ARM_FPU=fpv4-sp-d16 -DIOTSPOOL_ARM_FLOAT_ABI=hard"
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
-        run: sudo apt-get install -y gcc-arm-none-eabi
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
       - name: Configure
+        env:
+          ARM_EXTRA_FLAGS: ${{ matrix.extra_flags }}
         run: |
-          cmake -S . -B build-stm32 \
+          extra_flags=""
+          if [ -n "$ARM_EXTRA_FLAGS" ]; then
+            extra_flags=" $ARM_EXTRA_FLAGS"
+          fi
+          cmake -S . -B build-arm-${{ matrix.cpu }} \
             -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-none-eabi-gcc.cmake \
             -DIOTSPOOL_BUILD_TESTS=OFF \
-            -DIOTSPOOL_BUILD_EXAMPLES=OFF
+            -DIOTSPOOL_BUILD_EXAMPLES=ON \
+            -DIOTSPOOL_ENABLE_SHA256=ON \
+            -DIOTSPOOL_ARM_CPU=${{ matrix.cpu }}${extra_flags}
       - name: Build
-        run: cmake --build build-stm32 -j$(nproc)
+        run: cmake --build build-arm-${{ matrix.cpu }} --parallel --target iotspool_arm_smoke

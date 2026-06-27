@@ -2,7 +2,7 @@
 
 > **Persistent store-and-forward queue for MQTT publish.**  
 > Survives power loss and reboots. Runs on Linux, ESP32, STM32.  
-> No RTOS required. C99. Zero dynamic dependencies.
+> No RTOS required. C99/C11. Zero dynamic dependencies.
 
 ```
 Device reboots at 3am. WiFi is down. You lose no telemetry.
@@ -82,8 +82,11 @@ cmake -S . -B build && cmake --build build -j
 
 ## Storage backends
 
-The library uses a simple vtable (`iotspool_store_t`) with four required callbacks:
-`append`, `read_at`, `sync`, `size_bytes`. Provide your own to target any storage.
+The library uses a simple vtable (`iotspool_store_t`) with required callbacks:
+`append`, `read_at`, `sync`, `size_bytes`, `truncate_to`, `replace`. Provide your own to target any storage.
+
+Concurrency is caller-controlled unless you supply `cfg.lock` / `cfg.unlock`.
+When present, the core uses them to serialize public stateful operations.
 
 **POSIX / ESP-IDF VFS** (included):
 ```c
@@ -121,7 +124,7 @@ Optionally enable **SHA-256** per record for stronger corruption detection:
 ```c
 cfg.enable_sha256 = true;
 ```
-Note: SHA-256 here detects silent data corruption, not adversarial tampering.
+Note: CRC32 and SHA-256 here detect silent data corruption only, not adversarial tampering.
 For authentication, add a MAC layer on top.
 
 ## Configuration

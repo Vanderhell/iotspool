@@ -40,6 +40,10 @@ static bool cfg_valid(const iotspool_cfg_t *cfg) {
         return false;
     }
     if (cfg->min_retry_ms > cfg->max_retry_ms) return false;
+    if ((cfg->lock == NULL) != (cfg->unlock == NULL)) return false;
+#ifndef IOTSPOOL_ENABLE_SHA256
+    if (cfg->enable_sha256) return false;
+#endif
     return true;
 }
 
@@ -49,6 +53,24 @@ static bool store_valid(const iotspool_store_t *store) {
         return false;
     }
     return true;
+}
+
+static iotspool_err_t spool_lock_state(iotspool_t *s) {
+    if (!s || !s->cfg.lock || !s->cfg.unlock) return IOTSPOOL_OK;
+    return s->cfg.lock(s->cfg.lock_ctx);
+}
+
+static iotspool_err_t spool_unlock_state(iotspool_t *s) {
+    if (!s || !s->cfg.lock || !s->cfg.unlock) return IOTSPOOL_OK;
+    return s->cfg.unlock(s->cfg.lock_ctx);
+}
+
+static bool store_has_room(const iotspool_t *s, uint32_t need_bytes) {
+    if (!s) return false;
+    uint64_t used = (uint64_t)s->store.size_bytes(s->store.ctx);
+    uint64_t need = (uint64_t)need_bytes;
+    uint64_t total = used + need;
+    return total <= (uint64_t)s->cfg.max_store_bytes;
 }
 
 static void clear_inflight(iotspool_t *s) {
@@ -111,6 +133,7 @@ static iotspool_err_t write_superblock(iotspool_t *s, uint32_t committed_pos) {
 }
 
 static iotspool_err_t append_record_and_sync(iotspool_t *s, const uint8_t *buf, uint32_t len) {
+    if (!store_has_room(s, len)) return IOTSPOOL_EFULL;
     iotspool_err_t err = s->store.append(s->store.ctx, buf, len);
     if (err != IOTSPOOL_OK) return err;
     err = s->store.sync(s->store.ctx);
@@ -119,6 +142,10 @@ static iotspool_err_t append_record_and_sync(iotspool_t *s, const uint8_t *buf, 
 }
 
 static void backoff_reset_local(iotspool_t *s);
+static iotspool_err_t iotspool_drop_oldest_locked(iotspool_t *s, uint32_t now_ms);
+static iotspool_err_t iotspool_release_or_timeout_locked(iotspool_t *s,
+                                                         const iotspool_inflight_t *token,
+                                                         uint32_t now_ms);
 
 static iotspool_err_t compact_to_live_generation(iotspool_t *s) {
     if (!s) return IOTSPOOL_EINVAL;
@@ -274,32 +301,27 @@ static iotspool_err_t compact_to_live_generation(iotspool_t *s) {
     return IOTSPOOL_OK;
 }
 
-iotspool_err_t iotspool_compact(iotspool_t *s) {
+static iotspool_err_t iotspool_compact_locked(iotspool_t *s) {
     return compact_to_live_generation(s);
 }
 
 static iotspool_err_t ensure_space_for(iotspool_t *s, uint32_t need_bytes, bool allow_drop) {
     if (!s) return IOTSPOOL_EINVAL;
-    size_t used = s->store.size_bytes(s->store.ctx);
-    size_t need = need_bytes;
-    if (used + need <= s->cfg.max_store_bytes) return IOTSPOOL_OK;
+    if (store_has_room(s, need_bytes)) return IOTSPOOL_OK;
 
     iotspool_err_t err = compact_to_live_generation(s);
     if (err == IOTSPOOL_OK) {
-        used = s->store.size_bytes(s->store.ctx);
-        if (used + need <= s->cfg.max_store_bytes) return IOTSPOOL_OK;
+        if (store_has_room(s, need_bytes)) return IOTSPOOL_OK;
     }
 
     if (!allow_drop) return IOTSPOOL_EFULL;
     while (s->entry_count > 0) {
-        err = iotspool_drop_oldest(s, 0);
+        err = iotspool_drop_oldest_locked(s, 0);
         if (err != IOTSPOOL_OK) return err;
-        used = s->store.size_bytes(s->store.ctx);
-        if (used + need <= s->cfg.max_store_bytes) return IOTSPOOL_OK;
+        if (store_has_room(s, need_bytes)) return IOTSPOOL_OK;
         err = compact_to_live_generation(s);
         if (err != IOTSPOOL_OK) return err;
-        used = s->store.size_bytes(s->store.ctx);
-        if (used + need <= s->cfg.max_store_bytes) return IOTSPOOL_OK;
+        if (store_has_room(s, need_bytes)) return IOTSPOOL_OK;
     }
     return IOTSPOOL_EFULL;
 }
@@ -396,8 +418,6 @@ static iotspool_err_t remove_by_id(iotspool_t *s, iotspool_msg_id_t id) {
     return IOTSPOOL_OK;
 }
 
-iotspool_err_t iotspool_drop_oldest(iotspool_t *s, uint32_t now_ms);
-
 static iotspool_err_t ensure_ready_state(iotspool_t *s) {
     if (!s) return IOTSPOOL_EINVAL;
     if (s->state != IOTSPOOL_STATE_READY) return IOTSPOOL_ESTATE;
@@ -440,6 +460,7 @@ const char *iotspool_strerror(iotspool_err_t err) {
         case IOTSPOOL_ESTATE:    return "Invalid lifecycle state";
         case IOTSPOOL_ENOMEM:    return "Out of memory";
         case IOTSPOOL_EAGAIN:    return "Try again later";
+        case IOTSPOOL_EBUSY:     return "Busy";
         default:                 return "Unknown error";
     }
 }
@@ -626,7 +647,7 @@ static iotspool_err_t rebuild_from_store(iotspool_t *s, uint32_t size) {
     return IOTSPOOL_OK;
 }
 
-iotspool_err_t iotspool_recover(iotspool_t *s) {
+static iotspool_err_t iotspool_recover_locked(iotspool_t *s) {
     if (!s) return IOTSPOOL_EINVAL;
     if (s->state == IOTSPOOL_STATE_READY) return IOTSPOOL_ESTATE;
     s->state = IOTSPOOL_STATE_RECOVERING;
@@ -639,7 +660,7 @@ iotspool_err_t iotspool_recover(iotspool_t *s) {
     return IOTSPOOL_OK;
 }
 
-iotspool_err_t iotspool_enqueue(iotspool_t *s, const iotspool_msg_t *m,
+static iotspool_err_t iotspool_enqueue_locked(iotspool_t *s, const iotspool_msg_t *m,
                                 iotspool_msg_id_t *out_id)
 {
     if (!s || !m) return IOTSPOOL_EINVAL;
@@ -653,12 +674,12 @@ iotspool_err_t iotspool_enqueue(iotspool_t *s, const iotspool_msg_t *m,
     if (m->payload_len > s->cfg.max_payload_bytes) return IOTSPOOL_EINVAL;
     if (s->entry_count >= s->entry_cap) {
         if (!s->cfg.drop_oldest_on_full) return IOTSPOOL_EFULL;
-        st = iotspool_drop_oldest(s, 0);
+        st = iotspool_drop_oldest_locked(s, 0);
         if (st != IOTSPOOL_OK) return st;
     }
     if ((uint32_t)s->store.size_bytes(s->store.ctx) >= s->cfg.max_store_bytes) {
         if (!s->cfg.drop_oldest_on_full) return IOTSPOOL_EFULL;
-        st = iotspool_drop_oldest(s, 0);
+        st = iotspool_drop_oldest_locked(s, 0);
         if (st != IOTSPOOL_OK) return st;
     }
 
@@ -688,7 +709,7 @@ iotspool_err_t iotspool_enqueue(iotspool_t *s, const iotspool_msg_t *m,
     return IOTSPOOL_OK;
 }
 
-iotspool_err_t iotspool_drop_oldest(iotspool_t *s, uint32_t now_ms) {
+static iotspool_err_t iotspool_drop_oldest_locked(iotspool_t *s, uint32_t now_ms) {
     (void)now_ms;
     if (!s) return IOTSPOOL_EINVAL;
     iotspool_err_t st = ensure_ready_state(s);
@@ -708,14 +729,14 @@ iotspool_err_t iotspool_drop_oldest(iotspool_t *s, uint32_t now_ms) {
     return IOTSPOOL_OK;
 }
 
-iotspool_err_t iotspool_acquire_ready(iotspool_t *s, uint32_t now_ms,
+static iotspool_err_t iotspool_acquire_ready_locked(iotspool_t *s, uint32_t now_ms,
                                       iotspool_inflight_t *out)
 {
     if (!s || !out) return IOTSPOOL_EINVAL;
     iotspool_err_t st = ensure_ready_state(s);
     if (st != IOTSPOOL_OK) return st;
     if (s->entry_count == 0) return IOTSPOOL_ENOTFOUND;
-    if (s->inflight_active && !s->cfg.allow_concurrent_acquire) return IOTSPOOL_ESTATE;
+    if (s->inflight_active && !s->cfg.allow_concurrent_acquire) return IOTSPOOL_EBUSY;
     if (!backoff_ready_local(s, now_ms)) return IOTSPOOL_EAGAIN;
 
     iotspool_entry_t *e = entry_at(s, 0);
@@ -755,7 +776,7 @@ static bool inflight_matches(const iotspool_t *s, const iotspool_inflight_t *tok
            s->inflight.generation == token->generation;
 }
 
-iotspool_err_t iotspool_publish_confirmed(iotspool_t *s,
+static iotspool_err_t iotspool_publish_confirmed_locked(iotspool_t *s,
                                           const iotspool_inflight_t *token)
 {
     if (!s || !token) return IOTSPOOL_EINVAL;
@@ -777,7 +798,7 @@ iotspool_err_t iotspool_publish_confirmed(iotspool_t *s,
     return IOTSPOOL_OK;
 }
 
-iotspool_err_t iotspool_publish_failed(iotspool_t *s,
+static iotspool_err_t iotspool_publish_failed_locked(iotspool_t *s,
                                        const iotspool_inflight_t *token,
                                        uint32_t now_ms)
 {
@@ -787,7 +808,7 @@ iotspool_err_t iotspool_publish_failed(iotspool_t *s,
     return IOTSPOOL_OK;
 }
 
-iotspool_err_t iotspool_release_or_timeout(iotspool_t *s,
+static iotspool_err_t iotspool_release_or_timeout_locked(iotspool_t *s,
                                            const iotspool_inflight_t *token,
                                            uint32_t now_ms)
 {
@@ -800,7 +821,7 @@ iotspool_err_t iotspool_release_or_timeout(iotspool_t *s,
     return IOTSPOOL_OK;
 }
 
-iotspool_err_t iotspool_ack(iotspool_t *s, iotspool_msg_id_t id) {
+static iotspool_err_t iotspool_ack_locked(iotspool_t *s, iotspool_msg_id_t id) {
     if (!s) return IOTSPOOL_EINVAL;
     iotspool_err_t st = ensure_ready_state(s);
     if (st != IOTSPOOL_OK) return st;
@@ -825,20 +846,20 @@ iotspool_err_t iotspool_ack(iotspool_t *s, iotspool_msg_id_t id) {
     return IOTSPOOL_OK;
 }
 
-void iotspool_stats(const iotspool_t *s, iotspool_stats_t *stats) {
+static void iotspool_stats_locked(const iotspool_t *s, iotspool_stats_t *stats) {
     if (!s || !stats) return;
     *stats = s->stats;
     stats->pending_count = s->entry_count;
     stats->store_bytes = s->store.size_bytes ? s->store.size_bytes(s->store.ctx) : 0u;
 }
 
-iotspool_err_t iotspool_peek_ready(iotspool_t *s, uint32_t now_ms,
+static iotspool_err_t iotspool_peek_ready_locked(iotspool_t *s, uint32_t now_ms,
                                    iotspool_msg_t *out,
                                    iotspool_msg_id_t *out_id)
 {
     if (!s || !out || !out_id) return IOTSPOOL_EINVAL;
     iotspool_inflight_t token = {0};
-    iotspool_err_t st = iotspool_acquire_ready(s, now_ms, &token);
+    iotspool_err_t st = iotspool_acquire_ready_locked(s, now_ms, &token);
     if (st != IOTSPOOL_OK) return st;
     out->topic = token.topic;
     out->payload = token.payload;
@@ -846,13 +867,133 @@ iotspool_err_t iotspool_peek_ready(iotspool_t *s, uint32_t now_ms,
     out->qos = token.qos;
     out->retain = token.retain;
     *out_id = token.id;
-    (void)iotspool_release_or_timeout(s, &token, now_ms);
+    (void)iotspool_release_or_timeout_locked(s, &token, now_ms);
     return IOTSPOOL_OK;
 }
 
-void iotspool_on_publish_fail(iotspool_t *s, uint32_t now_ms) {
+static void iotspool_on_publish_fail_locked(iotspool_t *s, uint32_t now_ms) {
     if (!s) return;
     if (!s->inflight_active) return;
     (void)now_ms;
     backoff_fail_local(s, now_ms);
+}
+
+iotspool_err_t iotspool_compact(iotspool_t *s) {
+    iotspool_err_t err = spool_lock_state(s);
+    if (err != IOTSPOOL_OK) return err;
+    err = iotspool_compact_locked(s);
+    iotspool_err_t unlock_err = spool_unlock_state(s);
+    if (unlock_err != IOTSPOOL_OK) return (err == IOTSPOOL_OK) ? unlock_err : err;
+    return err;
+}
+
+iotspool_err_t iotspool_recover(iotspool_t *s) {
+    iotspool_err_t err = spool_lock_state(s);
+    if (err != IOTSPOOL_OK) return err;
+    err = iotspool_recover_locked(s);
+    iotspool_err_t unlock_err = spool_unlock_state(s);
+    if (unlock_err != IOTSPOOL_OK) return (err == IOTSPOOL_OK) ? unlock_err : err;
+    return err;
+}
+
+iotspool_err_t iotspool_enqueue(iotspool_t *s, const iotspool_msg_t *m,
+                                iotspool_msg_id_t *out_id)
+{
+    iotspool_err_t err = spool_lock_state(s);
+    if (err != IOTSPOOL_OK) return err;
+    err = iotspool_enqueue_locked(s, m, out_id);
+    iotspool_err_t unlock_err = spool_unlock_state(s);
+    if (unlock_err != IOTSPOOL_OK) return (err == IOTSPOOL_OK) ? unlock_err : err;
+    return err;
+}
+
+iotspool_err_t iotspool_drop_oldest(iotspool_t *s, uint32_t now_ms) {
+    iotspool_err_t err = spool_lock_state(s);
+    if (err != IOTSPOOL_OK) return err;
+    err = iotspool_drop_oldest_locked(s, now_ms);
+    iotspool_err_t unlock_err = spool_unlock_state(s);
+    if (unlock_err != IOTSPOOL_OK) return (err == IOTSPOOL_OK) ? unlock_err : err;
+    return err;
+}
+
+iotspool_err_t iotspool_acquire_ready(iotspool_t *s, uint32_t now_ms,
+                                      iotspool_inflight_t *out)
+{
+    iotspool_err_t err = spool_lock_state(s);
+    if (err != IOTSPOOL_OK) return err;
+    err = iotspool_acquire_ready_locked(s, now_ms, out);
+    iotspool_err_t unlock_err = spool_unlock_state(s);
+    if (unlock_err != IOTSPOOL_OK) return (err == IOTSPOOL_OK) ? unlock_err : err;
+    return err;
+}
+
+iotspool_err_t iotspool_publish_confirmed(iotspool_t *s,
+                                          const iotspool_inflight_t *token)
+{
+    iotspool_err_t err = spool_lock_state(s);
+    if (err != IOTSPOOL_OK) return err;
+    err = iotspool_publish_confirmed_locked(s, token);
+    iotspool_err_t unlock_err = spool_unlock_state(s);
+    if (unlock_err != IOTSPOOL_OK) return (err == IOTSPOOL_OK) ? unlock_err : err;
+    return err;
+}
+
+iotspool_err_t iotspool_publish_failed(iotspool_t *s,
+                                       const iotspool_inflight_t *token,
+                                       uint32_t now_ms)
+{
+    iotspool_err_t err = spool_lock_state(s);
+    if (err != IOTSPOOL_OK) return err;
+    err = iotspool_publish_failed_locked(s, token, now_ms);
+    iotspool_err_t unlock_err = spool_unlock_state(s);
+    if (unlock_err != IOTSPOOL_OK) return (err == IOTSPOOL_OK) ? unlock_err : err;
+    return err;
+}
+
+iotspool_err_t iotspool_release_or_timeout(iotspool_t *s,
+                                           const iotspool_inflight_t *token,
+                                           uint32_t now_ms)
+{
+    iotspool_err_t err = spool_lock_state(s);
+    if (err != IOTSPOOL_OK) return err;
+    err = iotspool_release_or_timeout_locked(s, token, now_ms);
+    iotspool_err_t unlock_err = spool_unlock_state(s);
+    if (unlock_err != IOTSPOOL_OK) return (err == IOTSPOOL_OK) ? unlock_err : err;
+    return err;
+}
+
+iotspool_err_t iotspool_ack(iotspool_t *s, iotspool_msg_id_t id) {
+    iotspool_err_t err = spool_lock_state(s);
+    if (err != IOTSPOOL_OK) return err;
+    err = iotspool_ack_locked(s, id);
+    iotspool_err_t unlock_err = spool_unlock_state(s);
+    if (unlock_err != IOTSPOOL_OK) return (err == IOTSPOOL_OK) ? unlock_err : err;
+    return err;
+}
+
+void iotspool_stats(const iotspool_t *s, iotspool_stats_t *stats) {
+    if (!s || !stats) return;
+    iotspool_t *mutable_s = (iotspool_t *)s;
+    if (spool_lock_state(mutable_s) != IOTSPOOL_OK) return;
+    iotspool_stats_locked(s, stats);
+    (void)spool_unlock_state(mutable_s);
+}
+
+iotspool_err_t iotspool_peek_ready(iotspool_t *s, uint32_t now_ms,
+                                   iotspool_msg_t *out,
+                                   iotspool_msg_id_t *out_id)
+{
+    iotspool_err_t err = spool_lock_state(s);
+    if (err != IOTSPOOL_OK) return err;
+    err = iotspool_peek_ready_locked(s, now_ms, out, out_id);
+    iotspool_err_t unlock_err = spool_unlock_state(s);
+    if (unlock_err != IOTSPOOL_OK) return (err == IOTSPOOL_OK) ? unlock_err : err;
+    return err;
+}
+
+void iotspool_on_publish_fail(iotspool_t *s, uint32_t now_ms) {
+    if (!s) return;
+    if (spool_lock_state(s) != IOTSPOOL_OK) return;
+    iotspool_on_publish_fail_locked(s, now_ms);
+    (void)spool_unlock_state(s);
 }

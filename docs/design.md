@@ -64,6 +64,6 @@ Reset to `min_retry_ms` on successful ACK.
 
 ## Threat model limitations
 
-- CRC32 and SHA-256 detect **accidental** corruption, not adversarial tampering.
+- CRC32 and SHA-256 detect **accidental** corruption only, not adversarial tampering.
 - For authenticated integrity, add HMAC-SHA256 with a device key in a higher layer.
 - The store file is not encrypted; use filesystem-level encryption if confidentiality is required.

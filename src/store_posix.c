@@ -62,7 +62,8 @@ static iotspool_err_t posix_replace(void *ctx, const uint8_t *data, uint32_t len
     if (!c || !c->path || (!data && len > 0u)) return IOTSPOOL_EINVAL;
 
     char tmp_path[1024];
-    if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", c->path) < 0) return IOTSPOOL_EIO;
+    int tmp_len = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", c->path);
+    if (tmp_len < 0 || (size_t)tmp_len >= sizeof(tmp_path)) return IOTSPOOL_EINVAL;
 
     FILE *tmp = fopen(tmp_path, "wb");
     if (!tmp) return IOTSPOOL_EIO;

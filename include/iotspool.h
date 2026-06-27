@@ -30,7 +30,8 @@ typedef enum {
     IOTSPOOL_ENOTFOUND = 5,
     IOTSPOOL_ESTATE    = 6,
     IOTSPOOL_ENOMEM    = 7,
-    IOTSPOOL_EAGAIN    = 8
+    IOTSPOOL_EAGAIN    = 8,
+    IOTSPOOL_EBUSY     = 9
 } iotspool_err_t;
 
 const char *iotspool_strerror(iotspool_err_t err);
@@ -66,6 +67,8 @@ typedef struct {
     iotspool_err_t (*replace)(void *ctx, const uint8_t *data, uint32_t len);
 } iotspool_store_t;
 
+typedef iotspool_err_t (*iotspool_lock_fn)(void *ctx);
+
 typedef struct {
     uint32_t max_pending_msgs;
     uint32_t max_store_bytes;
@@ -76,6 +79,9 @@ typedef struct {
     bool     enable_sha256;
     bool     drop_oldest_on_full;
     bool     allow_concurrent_acquire;
+    void    *lock_ctx;
+    iotspool_lock_fn lock;
+    iotspool_lock_fn unlock;
 } iotspool_cfg_t;
 
 static inline iotspool_cfg_t iotspool_cfg_default(void) {
@@ -89,6 +95,9 @@ static inline iotspool_cfg_t iotspool_cfg_default(void) {
     c.enable_sha256 = false;
     c.drop_oldest_on_full = false;
     c.allow_concurrent_acquire = false;
+    c.lock_ctx = NULL;
+    c.lock = NULL;
+    c.unlock = NULL;
     return c;
 }
 
@@ -191,7 +200,16 @@ iotspool_err_t iotspool_compact(iotspool_t *s);
 
 void iotspool_stats(const iotspool_t *s, iotspool_stats_t *stats);
 
-/* Legacy convenience wrapper. */
+/* Legacy convenience wrapper.
+ * Concurrency contract:
+ * - If lock/unlock are not configured, the caller must serialize all public
+ *   stateful operations externally.
+ * - If lock/unlock are configured, every public operation that touches shared
+ *   state acquires the lock before calling back into the store backend.
+ *   Those callbacks must not re-enter iotspool.
+ * - ISR context is not supported unless the configured lock callback rejects
+ *   it explicitly with IOTSPOOL_EBUSY or IOTSPOOL_ESTATE.
+ */
 iotspool_err_t iotspool_peek_ready(iotspool_t *s, uint32_t now_ms,
                                    iotspool_msg_t *out,
                                    iotspool_msg_id_t *out_id);

@@ -1,8 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 project(iotspool VERSION 0.1.0 LANGUAGES C)
 
-set(CMAKE_C_STANDARD 99)
+set(IOTSPOOL_C_STANDARD "99" CACHE STRING "C language standard for iotspool builds")
+set_property(CACHE IOTSPOOL_C_STANDARD PROPERTY STRINGS 99 11)
+set(CMAKE_C_STANDARD "${IOTSPOOL_C_STANDARD}")
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
 
 option(IOTSPOOL_BUILD_TESTS   "Build test suite"      ON)
 option(IOTSPOOL_BUILD_EXAMPLES "Build host examples"  ON)
@@ -46,7 +49,12 @@ if(IOTSPOOL_BUILD_TESTS)
 endif()
 
 # ── Examples ─────────────────────────────────────────────────────────────────
-if(IOTSPOOL_BUILD_EXAMPLES AND NOT WIN32)
+if(IOTSPOOL_BUILD_EXAMPLES AND NOT WIN32 AND NOT CMAKE_CROSSCOMPILING)
     add_executable(example_rpi examples/rpi/main.c)
     target_link_libraries(example_rpi PRIVATE iotspool)
+endif()
+
+if(IOTSPOOL_BUILD_EXAMPLES AND CMAKE_CROSSCOMPILING)
+    add_executable(iotspool_arm_smoke examples/arm_smoke.c)
+    target_link_libraries(iotspool_arm_smoke PRIVATE iotspool)
 endif()
