@@ -1,11 +1,18 @@
 /* store_posix.c – POSIX (and ESP-IDF VFS) file storage backend.
  * SPDX-License-Identifier: MIT */
 
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "store_posix.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#if defined(__linux__) || defined(__APPLE__)
+#include <sys/types.h>
+#endif
 #if defined(_WIN32)
 #include <io.h>
 #include <windows.h>

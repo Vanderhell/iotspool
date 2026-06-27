@@ -71,11 +71,15 @@ void sha256_final(sha256_ctx_t *ctx, uint8_t digest[32]) {
     if (i>56){while(i<64)ctx->buf[i++]=0;sha256_transform(ctx,ctx->buf);i=0;}
     while(i<56)ctx->buf[i++]=0;
     uint64_t bits=ctx->count*8;
-    for(int j=7;j>=0;j--){ctx->buf[56+(7-j)]=(uint8_t)(bits>>(j*8));}
+    for (size_t j = 0; j < 8u; ++j) {
+        ctx->buf[56u + j] = (uint8_t)(bits >> ((7u - j) * 8u));
+    }
     sha256_transform(ctx,ctx->buf);
-    for(i=0;i<4;i++)
-        for(int j=0;j<8;j++)
-            digest[i+j*4]=(uint8_t)(ctx->state[j]>>((3-i)*8));
+    for (size_t j = 0; j < 8u; ++j) {
+        for (size_t i2 = 0; i2 < 4u; ++i2) {
+            digest[i2 + (j * 4u)] = (uint8_t)(ctx->state[j] >> ((3u - i2) * 8u));
+        }
+    }
 }
 
 void sha256(const uint8_t *data, size_t len, uint8_t digest[32]) {
