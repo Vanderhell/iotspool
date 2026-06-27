@@ -1,52 +1,73 @@
-/* backoff.c – Exponential backoff with full jitter ("Full Jitter" strategy).
+/*
+ * backoff.c - Exponential backoff with per-context PRNG.
  *
- * sleep = random_between(0, min(cap, max))
- * cap doubles on each failure until max is reached.
- *
- * SPDX-License-Identifier: MIT */
+ * SPDX-License-Identifier: MIT
+ */
 
 #include "backoff.h"
 
-/* Simple LCG for jitter – no stdlib dependency needed. */
-static uint32_t s_seed = 0xdeadbeef;
-static uint32_t lcg_rand(void) {
-    s_seed = s_seed * 1664525u + 1013904223u;
-    return s_seed;
+static uint32_t xorshift32(uint32_t *state) {
+    uint32_t x = *state;
+    if (x == 0) x = 0x6d2b79f5u;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    return x;
 }
 
-void backoff_init(backoff_t *b, uint32_t min_ms, uint32_t max_ms) {
-    b->min_ms         = min_ms;
-    b->max_ms         = max_ms;
-    b->current_cap_ms = min_ms;
+static bool time_after_eq(uint32_t now_ms, uint32_t deadline_ms) {
+    return (int32_t)(now_ms - deadline_ms) >= 0;
+}
+
+static uint32_t clamp_add_u32(uint32_t a, uint32_t b) {
+    if (UINT32_MAX - a < b) return UINT32_MAX;
+    return a + b;
+}
+
+void backoff_init(backoff_t *b, uint32_t min_ms, uint32_t max_ms,
+                  uint32_t seed)
+{
+    if (!b) return;
+    b->min_ms = min_ms;
+    b->max_ms = (max_ms < min_ms) ? min_ms : max_ms;
+    b->cap_ms = min_ms;
     b->retry_after_ms = 0;
+    b->failure_count = 0;
+    b->rng_state = seed ? seed : 0x9e3779b9u;
 }
 
 void backoff_reset(backoff_t *b) {
-    b->current_cap_ms = b->min_ms;
+    if (!b) return;
+    b->cap_ms = b->min_ms;
     b->retry_after_ms = 0;
+    b->failure_count = 0;
 }
 
 void backoff_on_fail(backoff_t *b, uint32_t now_ms) {
-    uint32_t cap = b->current_cap_ms;
+    if (!b) return;
+    uint32_t cap = b->cap_ms;
+    if (cap == 0) cap = b->min_ms;
     if (cap > b->max_ms) cap = b->max_ms;
 
-    /* Full jitter: sleep in [0, cap] */
-    uint32_t sleep_ms = (cap > 0) ? (lcg_rand() % (cap + 1)) : 0;
-    if (sleep_ms < b->min_ms) sleep_ms = b->min_ms;
+    uint32_t jitter = (cap == 0) ? 0 : (xorshift32(&b->rng_state) % (cap + 1u));
+    if (jitter < b->min_ms) jitter = b->min_ms;
+    b->retry_after_ms = clamp_add_u32(now_ms, jitter);
+    ++b->failure_count;
 
-    b->retry_after_ms = now_ms + sleep_ms;
-
-    /* Double cap for next failure */
-    if (b->current_cap_ms < b->max_ms / 2)
-        b->current_cap_ms *= 2;
-    else
-        b->current_cap_ms = b->max_ms;
+    if (b->cap_ms < b->max_ms / 2u) {
+        b->cap_ms *= 2u;
+        if (b->cap_ms < b->min_ms) b->cap_ms = b->max_ms;
+    } else {
+        b->cap_ms = b->max_ms;
+    }
 }
 
-int backoff_is_ready(const backoff_t *b, uint32_t now_ms) {
-    return (now_ms >= b->retry_after_ms);
+bool backoff_is_ready(const backoff_t *b, uint32_t now_ms) {
+    if (!b) return false;
+    return time_after_eq(now_ms, b->retry_after_ms);
 }
 
-uint32_t backoff_next_ms(const backoff_t *b) {
-    return b->retry_after_ms;
+uint32_t backoff_next_deadline(const backoff_t *b) {
+    return b ? b->retry_after_ms : 0;
 }

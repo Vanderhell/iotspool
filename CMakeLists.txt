@@ -10,9 +10,10 @@ option(IOTSPOOL_ENABLE_SHA256  "Enable SHA-256 support" ON)
 
 # ── Warnings ────────────────────────────────────────────────────────────────
 if(MSVC)
-    add_compile_options(/W4)
+    add_compile_options(/W4 /WX)
 elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
+    add_compile_options(-Wall -Wextra -Wpedantic -Werror
+                        -Wconversion -Wsign-conversion -Wshadow -Wformat=2 -Wundef)
 endif()
 
 # ── Library ─────────────────────────────────────────────────────────────────
@@ -20,7 +21,6 @@ add_library(iotspool STATIC
     src/spool.c
     src/record.c
     src/crc32.c
-    src/sha256.c
     src/backoff.c
     src/store_posix.c
 )
@@ -33,6 +33,7 @@ endif()
 
 if(IOTSPOOL_ENABLE_SHA256)
     target_compile_definitions(iotspool PUBLIC IOTSPOOL_ENABLE_SHA256)
+    target_sources(iotspool PRIVATE src/sha256.c)
 endif()
 
 # ── Tests ────────────────────────────────────────────────────────────────────
@@ -40,8 +41,8 @@ if(IOTSPOOL_BUILD_TESTS)
     enable_testing()
     add_executable(iotspool_tests tests/test_main.c)
     target_link_libraries(iotspool_tests PRIVATE iotspool)
-    target_include_directories(iotspool_tests PRIVATE src)
-    add_test(NAME iotspool_tests COMMAND iotspool_tests)
+    target_include_directories(iotspool_tests PRIVATE src include)
+    add_test(NAME iotspool_tests COMMAND $<TARGET_FILE:iotspool_tests>)
 endif()
 
 # ── Examples ─────────────────────────────────────────────────────────────────

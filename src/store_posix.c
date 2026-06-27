@@ -16,6 +16,7 @@
 
 typedef struct {
     FILE    *fp;
+    char    *path;
     uint32_t size;   /* cached size to avoid fseek on every append */
 } posix_ctx_t;
 
@@ -39,18 +40,89 @@ static iotspool_err_t posix_read_at(void *ctx, uint32_t off,
 static iotspool_err_t posix_sync(void *ctx) {
     posix_ctx_t *c = (posix_ctx_t *)ctx;
     if (fflush(c->fp) != 0) return IOTSPOOL_EIO;
-    /* fsync for real durability on Linux */
+    /* fsync for real durability on host platforms. */
 #if defined(__linux__) || defined(__APPLE__)
     {
         int fd = fileno(c->fp);
-        if (fd >= 0) fsync(fd);
+        if (fd < 0) return IOTSPOOL_EIO;
+        if (fsync(fd) != 0) return IOTSPOOL_EIO;
     }
+#elif defined(_WIN32)
+    if (_commit(_fileno(c->fp)) != 0) return IOTSPOOL_EIO;
 #endif
     return IOTSPOOL_OK;
 }
 
 static uint32_t posix_size(void *ctx) {
     return ((posix_ctx_t *)ctx)->size;
+}
+
+static iotspool_err_t posix_replace(void *ctx, const uint8_t *data, uint32_t len) {
+    posix_ctx_t *c = (posix_ctx_t *)ctx;
+    if (!c || !c->path || (!data && len > 0u)) return IOTSPOOL_EINVAL;
+
+    char tmp_path[1024];
+    if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", c->path) < 0) return IOTSPOOL_EIO;
+
+    FILE *tmp = fopen(tmp_path, "wb");
+    if (!tmp) return IOTSPOOL_EIO;
+    if (len > 0u && fwrite(data, 1, len, tmp) != len) {
+        fclose(tmp);
+        remove(tmp_path);
+        return IOTSPOOL_EIO;
+    }
+    if (fflush(tmp) != 0) {
+        fclose(tmp);
+        remove(tmp_path);
+        return IOTSPOOL_EIO;
+    }
+#if defined(__linux__) || defined(__APPLE__)
+    if (fsync(fileno(tmp)) != 0) {
+        fclose(tmp);
+        remove(tmp_path);
+        return IOTSPOOL_EIO;
+    }
+#elif defined(_WIN32)
+    if (_commit(_fileno(tmp)) != 0) {
+        fclose(tmp);
+        remove(tmp_path);
+        return IOTSPOOL_EIO;
+    }
+#endif
+    fclose(tmp);
+
+    if (c->fp) {
+        fflush(c->fp);
+        fclose(c->fp);
+        c->fp = NULL;
+    }
+
+#if defined(_WIN32)
+    if (!MoveFileExA(tmp_path, c->path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        remove(tmp_path);
+        c->fp = fopen(c->path, "a+b");
+        if (!c->fp) return IOTSPOOL_EIO;
+        fseek(c->fp, 0, SEEK_END);
+        long sz = ftell(c->fp);
+        c->size = (sz > 0) ? (uint32_t)sz : 0;
+        return IOTSPOOL_EIO;
+    }
+#else
+    if (rename(tmp_path, c->path) != 0) {
+        remove(tmp_path);
+        c->fp = fopen(c->path, "a+b");
+        if (!c->fp) return IOTSPOOL_EIO;
+        fseek(c->fp, 0, SEEK_END);
+        long sz = ftell(c->fp);
+        c->size = (sz > 0) ? (uint32_t)sz : 0;
+        return IOTSPOOL_EIO;
+    }
+#endif
+
+    c->fp = fopen(c->path, "a+b");
+    if (!c->fp) return IOTSPOOL_EIO;
+    c->size = len;
+    return IOTSPOOL_OK;
 }
 
 static iotspool_err_t posix_truncate(void *ctx, uint32_t new_size) {
@@ -92,10 +164,16 @@ iotspool_err_t store_posix_open(const char *path, iotspool_store_t *store) {
 
     posix_ctx_t *c = (posix_ctx_t *)calloc(1, sizeof(*c));
     if (!c) return IOTSPOOL_ENOMEM;
+    c->path = (char *)malloc(strlen(path) + 1u);
+    if (!c->path) {
+        free(c);
+        return IOTSPOOL_ENOMEM;
+    }
+    strcpy(c->path, path);
 
     /* Open for read+write, create if missing */
     c->fp = fopen(path, "a+b");
-    if (!c->fp) { free(c); return IOTSPOOL_EIO; }
+    if (!c->fp) { free(c->path); free(c); return IOTSPOOL_EIO; }
 
     /* Determine existing size */
     fseek(c->fp, 0, SEEK_END);
@@ -109,6 +187,7 @@ iotspool_err_t store_posix_open(const char *path, iotspool_store_t *store) {
     store->sync        = posix_sync;
     store->size_bytes  = posix_size;
     store->truncate_to = posix_truncate;
+    store->replace     = posix_replace;
     return IOTSPOOL_OK;
 }
 
@@ -116,6 +195,13 @@ void store_posix_close(iotspool_store_t *store) {
     if (!store || !store->ctx) return;
     posix_ctx_t *c = (posix_ctx_t *)store->ctx;
     if (c->fp) { fflush(c->fp); fclose(c->fp); }
+    free(c->path);
     free(c);
     store->ctx = NULL;
+    store->append = NULL;
+    store->read_at = NULL;
+    store->sync = NULL;
+    store->size_bytes = NULL;
+    store->truncate_to = NULL;
+    store->replace = NULL;
 }

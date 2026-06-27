@@ -1,92 +1,102 @@
-/**
- * record.h – Binary log record format (internal).
+/*
+ * record.h - Versioned on-disk format for iotspool.
  *
- * Wire layout (little-endian):
+ * The log begins with a fixed superblock followed by records.
+ * All multi-byte fields are little-endian.
  *
- *  ENQ record:
- *  [0]     magic    u8  = 0xE7
- *  [1]     type     u8  = RECORD_ENQ (0x01)
- *  [2]     version  u8  = RECORD_VERSION (0x01)
- *  [3]     flags    u8  (bit0=sha256_present, bit1=retain, bit2-3=qos)
- *  [4..7]  msg_id   u32
- *  [8..11] timestamp_ms u32 (low 32 bits of enqueue time)
- *  [12..15] topic_len u32
- *  [16..19] payload_len u32
- *  [20 .. 20+topic_len-1]       topic bytes (no null terminator in file)
- *  [20+topic_len .. +payload_len-1] payload bytes
- *  [optional 32 bytes]          SHA-256 if flags bit0 set
- *  [last 4 bytes]               CRC32 of all preceding bytes
- *
- *  ACK record:
- *  [0]     magic    u8  = 0xE7
- *  [1]     type     u8  = RECORD_ACK (0x02)
- *  [2]     version  u8  = RECORD_VERSION
- *  [3]     reserved u8  = 0
- *  [4..7]  msg_id   u32
- *  [8..11] CRC32
+ * SPDX-License-Identifier: MIT
  */
 
 #pragma once
-#include <stdint.h>
+
 #include <stdbool.h>
+#include <stdint.h>
 #include "../include/iotspool.h"
 
-#define RECORD_MAGIC    0xE7u
-#define RECORD_VERSION  0x01u
+#define IOTSPOOL_STORE_MAGIC 0x50534F49u /* "IOSP" */
+#define IOTSPOOL_STORE_VERSION 1u
+#define IOTSPOOL_RECORD_VERSION 1u
 
-#define RECORD_ENQ 0x01u
-#define RECORD_ACK 0x02u
+typedef enum {
+    IOTSPOOL_REC_TYPE_ENQUEUE = 1u,
+    IOTSPOOL_REC_TYPE_ACK     = 2u,
+    IOTSPOOL_REC_TYPE_DROP    = 3u
+} iotspool_record_type_t;
 
-#define RECORD_FLAG_SHA256 (1u << 0)
-#define RECORD_FLAG_RETAIN (1u << 1)
-#define RECORD_FLAG_QOS1   (1u << 2)
-
-/* Fixed header size before variable-length fields */
-#define RECORD_ENQ_HDR_SIZE  20u
-#define RECORD_ACK_SIZE      12u
-#define RECORD_SHA256_SIZE   32u
-#define RECORD_CRC_SIZE       4u
+typedef enum {
+    IOTSPOOL_DEC_VALID = 0,
+    IOTSPOOL_DEC_CLEAN_END,
+    IOTSPOOL_DEC_INCOMPLETE_TAIL,
+    IOTSPOOL_DEC_CORRUPT,
+    IOTSPOOL_DEC_UNSUPPORTED_VERSION,
+    IOTSPOOL_DEC_UNKNOWN_TYPE,
+    IOTSPOOL_DEC_INVALID_LENGTH,
+    IOTSPOOL_DEC_IO_ERROR,
+    IOTSPOOL_DEC_GENERATION_MISMATCH
+} iotspool_decode_result_t;
 
 typedef struct {
-    uint8_t  type;
-    uint8_t  flags;
-    uint32_t msg_id;
-    uint32_t timestamp_ms;
+    uint32_t magic;
+    uint16_t version;
+    uint16_t record_version;
+    uint32_t generation;
+    uint32_t active_identity;
+    uint32_t configured_size;
+    uint32_t committed_pos;
+    uint32_t crc32;
+    uint8_t  reserved[4];
+} iotspool_superblock_t;
+
+typedef struct {
+    uint64_t msg_id;
+    uint32_t generation;
     uint32_t topic_len;
     uint32_t payload_len;
-    /* Pointers into caller-owned buffer after decode */
+    uint32_t timestamp_ms;
+    uint8_t  qos;
+    bool     retain;
     const char    *topic;
     const uint8_t *payload;
-    uint8_t  sha256[32]; /* valid only if RECORD_FLAG_SHA256 set */
-} record_enq_t;
+} record_enqueue_t;
 
 typedef struct {
-    uint32_t msg_id;
+    uint64_t msg_id;
 } record_ack_t;
 
-/**
- * Encode an ENQ record into buf (caller must provide enough space).
- * Returns total bytes written, or 0 on error.
- */
-uint32_t record_encode_enq(uint8_t *buf, uint32_t buf_cap,
-                            const iotspool_msg_t *m,
-                            uint32_t msg_id, uint32_t timestamp_ms,
-                            bool enable_sha256);
+typedef struct {
+    uint64_t msg_id;
+} record_drop_t;
 
-/**
- * Encode an ACK record. Returns bytes written (always RECORD_ACK_SIZE), 0 on err.
- */
-uint32_t record_encode_ack(uint8_t *buf, uint32_t buf_cap, uint32_t msg_id);
+size_t record_superblock_size(void);
+size_t record_header_size(void);
+size_t record_min_record_size(iotspool_record_type_t type);
 
-/**
- * Decode one record starting at buf[0].
- * Returns total record size (so caller can advance), 0 on corrupt/incomplete.
- * type_out is set to RECORD_ENQ or RECORD_ACK.
- */
-uint32_t record_decode(const uint8_t *buf, uint32_t available,
-                       uint8_t *type_out,
-                       record_enq_t *enq_out,   /* may be NULL */
-                       record_ack_t *ack_out);  /* may be NULL */
+iotspool_decode_result_t record_decode(const uint8_t *buf, uint32_t avail,
+                                       uint8_t *type_out,
+                                       record_enqueue_t *enq_out,
+                                       record_ack_t *ack_out,
+                                       record_drop_t *drop_out,
+                                       uint32_t *consumed_out);
 
-/** Compute CRC32 (ISO 3309 / Ethernet polynomial). */
+uint32_t record_encode_enqueue(uint8_t *buf, uint32_t cap,
+                               const iotspool_msg_t *m,
+                               uint64_t msg_id,
+                               uint32_t generation,
+                               uint32_t timestamp_ms,
+                               bool enable_sha256);
+uint32_t record_encode_ack(uint8_t *buf, uint32_t cap,
+                           uint64_t msg_id, uint32_t generation);
+uint32_t record_encode_drop(uint8_t *buf, uint32_t cap,
+                            uint64_t msg_id, uint32_t generation);
+
+iotspool_err_t record_encode_superblock(uint8_t *buf, uint32_t cap,
+                                        const iotspool_superblock_t *sb);
+iotspool_decode_result_t record_decode_superblock(const uint8_t *buf,
+                                                  uint32_t avail,
+                                                  iotspool_superblock_t *sb);
+
+bool record_checked_add_u32(uint32_t a, uint32_t b, uint32_t *out);
+bool record_checked_add_u64(uint64_t a, uint64_t b, uint64_t *out);
+bool record_checked_mul_u32(uint32_t a, uint32_t b, uint32_t *out);
+
 uint32_t crc32(const uint8_t *data, uint32_t len);
